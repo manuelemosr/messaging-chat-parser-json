@@ -22,7 +22,7 @@ def parse_line(line: str, datetime_format: str) -> Tuple[Optional[datetime], str
     actor = 'invalid'
     text = ''
 
-    line_elements = parse.parse("{date}, {time} - {actor}: {text}", line)
+    line_elements = parse.parse("[{date}, {time}] {actor}: {text}", line)
     if line_elements:
         message_datetime = f"{line_elements['date']}, {line_elements['time']}"  # e.g. "31/12/19, 20:02"
         timestamp = datetime.strptime(message_datetime, datetime_format)
@@ -49,13 +49,15 @@ def parse_chat(file_path: str,
                user_name: str,
                datetime_format: str,
                delta_h_threshold: int,
-               session_token: str = None) -> List[str]:
+               session_token: str = None,
+               to_json: bool = False) -> List[str]:
     chat_text = [session_token] if session_token else []
     invalid_lines = []
 
     with open(file_path) as f:
         lines = f.readlines()
         t_last = None
+        others_text = ''
         for line in lines:
             t_current, actor, text = parse_line(line, datetime_format)
 
@@ -69,7 +71,21 @@ def parse_chat(file_path: str,
             t_last = t_current
 
             actor = USER_TAG if actor == user_name else OTHERS_TAG
-            chat_text.append(f"{actor} {text}")
+            text = text.rstrip()
+            if to_json:
+                if actor != USER_TAG:
+                    if not others_text:
+                        others_text = text
+                    else:
+                        #todo: last character can be an emoji or other pontuation
+                        if others_text[-1] != '.':
+                            others_text += '.'
+                        others_text += f' {text}'
+                else:
+                    chat_text.append(f'{{"prompt": "{others_text}", "completion": "{text}"}}')
+                    others_text = ''
+            else:
+                chat_text.append(f"{actor} {text}")
     logging.info(f'Found {len(invalid_lines)} invalid lines in {file_path}')
 
     open(f"./tmp/invalid_lines_{basename(file_path)}", 'w').writelines("\n".join(invalid_lines))
@@ -81,7 +97,8 @@ def run(user_name: str,
         output_path: str,
         time_format: str,
         delta_h_threshold: int,
-        session_token: str = None):
+        session_token: str = None,
+        to_json: bool = False):
     logging.info(f"WA_STOP_WORDS:{WA_STOP_WORDS}")
     Path("./tmp").mkdir(parents=True, exist_ok=True)
     txt_files_name, txt_files_paths = get_dir_files(dir_path=chats_path, extension_filter=".txt")
@@ -89,9 +106,10 @@ def run(user_name: str,
 
     wa_text = []
     for file_name, file_path in zip(txt_files_name, txt_files_paths):
-        file_text_parsed = parse_chat(file_path, user_name, time_format, delta_h_threshold, session_token)
+        file_text_parsed = parse_chat(file_path, user_name, time_format, delta_h_threshold, session_token, to_json)
         wa_text.extend(file_text_parsed)
 
+    #todo: change file format
     chat_path = join(output_path, 'wa-chats.txt')
     save_text(wa_text, chat_path)
 
@@ -111,6 +129,7 @@ def main(argv):
     parser.add_argument("--time_format", type=str, default="%d/%m/%y, %H:%M",
                         help="The WhatsApp datetime format. The default is the italian format.")
     parser.add_argument("-v", "--verbose", help="increase output verbosity", action="store_true")
+    parser.add_argument("--to_json", help="outputs data in json format, used for fine-tuning GPT-3", action="store_true")
     args = parser.parse_args(argv[1:])
     loglevel = logging.DEBUG if args.verbose else logging.INFO
     process_name = basename(normpath(argv[0]))
